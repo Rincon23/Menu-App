@@ -27,7 +27,8 @@ verificando. O front (`RinconMenu.jsx`) manda a lista de URLs pro container
 `rincon-menu-checker`, que dá um `curl` em cada uma **a partir do servidor** e
 aplica uma regra simples:
 
-- resposta é a página de **erro 1033 do Cloudflare Tunnel** → fora do ar
+- status HTTP de **origem fora do ar** (502/503/504/52x/530) → fora do ar
+- corpo é a página de **erro do Cloudflare Tunnel / "bad gateway"** → fora do ar
 - erro de rede / DNS / timeout → fora do ar
 - qualquer outra resposta → no ar
 
@@ -37,7 +38,8 @@ O resultado é cacheado por 30s e o front revalida a cada 60s.
 
 Por segurança (anti-SSRF) o checador só aceita hosts dentro de
 `.rincon.dev.br` — ajuste `ALLOWED_HOST_SUFFIX` no `docker-compose.yml` se
-mudar de domínio.
+mudar de domínio. Hosts públicos extras que aparecem no menu (ex.:
+`cloudflare.com`) ficam em `ALLOWED_EXACT_HOSTS` (lista separada por vírgula).
 
 ## Editar os apps
 Abra `src/RinconMenu.jsx` e edite o array `GROUPS` no topo do arquivo. Cada grupo vira uma seção na página:
