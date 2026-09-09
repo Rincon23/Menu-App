@@ -105,6 +105,15 @@ const GROUPS = [
     label: "Rede · sites úteis",
     Icon: Globe,
     apps: [
+      {
+        id: "cloudflare",
+        name: "Cloudflare",
+        desc: "DNS, tunnels e proxy reverso",
+        url: "https://www.cloudflare.com/pt-br/",
+        domain: "cloudflare.com",
+        accent: "#F38020",
+        Icon: Globe,
+      },
     ],
   },
 ];
