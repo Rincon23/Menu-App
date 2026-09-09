@@ -1,0 +1,42 @@
+services:
+  rincon-menu:
+    build: .
+    # Alternativa: buildar direto do GitHub, sem precisar clonar o repo
+    # no servidor. Toda vez que rodar "docker compose up -d --build" ele
+    # busca o código mais recente do branch main sozinho.
+    #
+    # build:
+    #   context: https://github.com/SEU-USUARIO/rincon-menu.git#main
+    container_name: rincon-menu
+    restart: unless-stopped
+    depends_on:
+      - rincon-menu-checker
+    ports:
+      - "8090:80"
+    # Se você já tem uma rede compartilhada com seu proxy reverso
+    # (Nginx Proxy Manager, Traefik, etc), descomente as linhas abaixo
+    # e remova o "ports" acima — o proxy fala com o container pela rede interna.
+    # IMPORTANTE: descomente o bloco "networks" nos DOIS serviços (mantendo
+    # "default" na lista), senão o Nginx perde contato com o checador.
+    #
+    # networks:
+    #   - default
+    #   - proxy
+
+  # Checador de status: pinga cada serviço a partir do servidor (sem CORS,
+  # enxerga o status HTTP real). O Nginx acima faz proxy de /api/ pra cá.
+  # Não precisa expor porta no host — só o Nginx conversa com ele.
+  rincon-menu-checker:
+    build: ./server
+    container_name: rincon-menu-checker
+    restart: unless-stopped
+    environment:
+      # Só deixa checar hosts dentro desse sufixo (trava SSRF).
+      - ALLOWED_HOST_SUFFIX=.rincon.dev.br
+    # networks:
+    #   - default
+
+# networks:
+#   proxy:
+#     external: true
+#     name: nome_da_sua_rede_do_proxy
