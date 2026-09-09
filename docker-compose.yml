@@ -12,7 +12,7 @@ services:
     depends_on:
       - rincon-menu-checker
     ports:
-      - "8090:80"
+      - "8092:80"
     # Se você já tem uma rede compartilhada com seu proxy reverso
     # (Nginx Proxy Manager, Traefik, etc), descomente as linhas abaixo
     # e remova o "ports" acima — o proxy fala com o container pela rede interna.
