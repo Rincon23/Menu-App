@@ -1,0 +1,19 @@
+# Agente de métricas — roda no Servidor (ou em qualquer máquina além da que
+# roda o menu). É o mesmo checador, respondendo GET /api/agent com a RAM, o
+# disco e os containers DESTA máquina. O checador do Orange Pi busca aqui
+# pelo Tailscale (SERVIDOR_AGENT_URL no .env do Pi).
+#
+#   docker compose -f docker-compose.agent.yml up -d --build
+#
+# Precisa de um arquivo .env ao lado com o MESMO AGENT_TOKEN do Orange Pi.
+services:
+  rincon-menu-agent:
+    build: ./server
+    container_name: rincon-menu-agent
+    restart: unless-stopped
+    ports:
+      - "3002:3001"
+    environment:
+      - AGENT_TOKEN=${AGENT_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro

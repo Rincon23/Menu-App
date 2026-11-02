@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Search, Star, Moon, Sun, KeyRound, Box, RefreshCw, GitBranch,
-  ExternalLink, Cpu, Server, Globe, Pin, Film, Cloud,
+  ExternalLink, Cpu, Server, Globe, Pin, Film, Cloud, Wallet, Video,
+  Container, ChevronDown,
 } from "lucide-react";
 
 const GROUPS = [
@@ -45,6 +46,15 @@ const GROUPS = [
         domain: "senhas.rincon.dev.br",
         accent: "#3B6FE0",
         Icon: KeyRound,
+      },
+      {
+        id: "capital",
+        name: "Capital +",
+        desc: "Orçamento mensal por categoria",
+        url: "https://capital.rincon.dev.br/",
+        domain: "capital.rincon.dev.br",
+        accent: "#22C55E",
+        Icon: Wallet,
       },
     ],
   },
@@ -98,6 +108,15 @@ const GROUPS = [
         accent: "#14B8A6",
         Icon: RefreshCw,
       },
+      {
+        id: "live",
+        name: "Live",
+        desc: "Sala privada: voz, vídeo e tela",
+        url: "https://live.rincon.dev.br/",
+        domain: "live.rincon.dev.br",
+        accent: "#E5484D",
+        Icon: Video,
+      },
     ],
   },
   {
@@ -132,6 +151,23 @@ async function fetchStatuses(apps, signal) {
   if (!res.ok) throw new Error(`checador respondeu ${res.status}`);
   const data = await res.json();
   return data.statuses || {};
+}
+
+// Métricas das máquinas (RAM, disco e containers rodando), já agrupadas pelo
+// id da seção ("orangepi", "servidor"). Seção sem máquina (rede) não aparece.
+async function fetchSystems(signal) {
+  const res = await fetch("/api/system", { signal });
+  if (!res.ok) throw new Error(`checador respondeu ${res.status}`);
+  const data = await res.json();
+  return data.machines || {};
+}
+
+function formatBytes(bytes) {
+  if (bytes == null) return "—";
+  const gb = bytes / 2 ** 30;
+  if (gb >= 1024) return `${(gb / 1024).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} TB`;
+  if (gb >= 1) return `${gb.toLocaleString("pt-BR", { maximumFractionDigits: 1 })} GB`;
+  return `${Math.round(bytes / 2 ** 20)} MB`;
 }
 
 function greeting(hour) {
@@ -195,6 +231,58 @@ function AppCard({ app, isFav, onToggleFav, status = "checking" }) {
   );
 }
 
+function UsageMeter({ label, used, total }) {
+  const pct = total ? Math.min(100, (used / total) * 100) : 0;
+  const level = pct >= 90 ? "high" : pct >= 75 ? "mid" : "low";
+  return (
+    <span className="meter" title={`${label}: ${Math.round(pct)}% em uso`}>
+      <span className="meter-label">{label}</span>
+      <span className={`meter-bar ${level}`}><span style={{ width: `${pct}%` }} /></span>
+      <span>{formatBytes(used)} / {formatBytes(total)}</span>
+    </span>
+  );
+}
+
+function MachineStats({ sys, open, onToggle }) {
+  if (sys.error) return <span className="meter unavailable">métricas indisponíveis</span>;
+  return (
+    <div className="machine-stats">
+      {sys.ram && <UsageMeter label="RAM" {...sys.ram} />}
+      {sys.disk && <UsageMeter label="DISCO" {...sys.disk} />}
+      {sys.containers && (
+        <button
+          className="containers-btn"
+          onClick={onToggle}
+          aria-expanded={open}
+          title={`${sys.containers.length} containers rodando`}
+          aria-label={`${open ? "Esconder" : "Mostrar"} ${sys.containers.length} containers`}
+        >
+          <Container size={12} />
+          {sys.containers.length}
+          <ChevronDown size={12} className={open ? "flip" : ""} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ContainerList({ containers }) {
+  return (
+    <div className="containers">
+      <div className="containers-row containers-head">
+        <span className="c-name">container</span><span>ram</span><span>disco</span>
+      </div>
+      {containers.map((c) => (
+        <div className="containers-row" key={c.name}>
+          <span className="c-name" title={c.image}>{c.name}</span>
+          <span>{formatBytes(c.ram)}</span>
+          <span>{formatBytes(c.disk)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function RinconMenu() {
   const [theme, setTheme] = useState("dark");
   const [now, setNow] = useState(new Date());
@@ -202,6 +290,8 @@ export default function RinconMenu() {
   const [favorites, setFavorites] = useState(() => new Set());
   const [loaded, setLoaded] = useState(false);
   const [statuses, setStatuses] = useState({});
+  const [systems, setSystems] = useState({});
+  const [openContainers, setOpenContainers] = useState(() => new Set());
   const searchRef = useRef(null);
   const reduceMotion = useMemo(
     () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
@@ -260,6 +350,26 @@ export default function RinconMenu() {
   }, [allApps]);
 
   useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadSystems() {
+      try {
+        setSystems(await fetchSystems(controller.signal));
+      } catch (err) {
+        // Mantém os últimos números conhecidos se o checador tropeçar.
+        if (err.name !== "AbortError") console.warn("métricas indisponíveis:", err.message);
+      }
+    }
+
+    loadSystems();
+    const t = setInterval(loadSystems, 30000);
+    return () => {
+      controller.abort();
+      clearInterval(t);
+    };
+  }, []);
+
+  useEffect(() => {
     function onKey(e) {
       if (e.key === "/" ) {
         const tag = document.activeElement?.tagName;
@@ -280,6 +390,14 @@ export default function RinconMenu() {
     setFavorites((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function toggleContainers(groupId) {
+    setOpenContainers((prev) => {
+      const next = new Set(prev);
+      next.has(groupId) ? next.delete(groupId) : next.add(groupId);
       return next;
     });
   }
@@ -439,9 +557,71 @@ export default function RinconMenu() {
         }
         .section-line {
           flex: 1;
+          min-width: 24px;
           height: 1px;
           background: var(--panel-border);
         }
+
+        .machine-stats { display: flex; align-items: center; gap: 14px; }
+        .meter {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 11px;
+          color: var(--text-muted);
+          white-space: nowrap;
+        }
+        .meter-label { color: var(--text-faint); }
+        .meter.unavailable { color: #fbbf24; }
+        .meter-bar {
+          width: 44px; height: 4px;
+          border-radius: 2px;
+          background: var(--panel-border);
+          overflow: hidden;
+        }
+        .meter-bar > span { display: block; height: 100%; border-radius: 2px; background: var(--online); }
+        .meter-bar.mid > span { background: #fbbf24; }
+        .meter-bar.high > span { background: #f87171; }
+        .containers-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 11px;
+          color: var(--text-muted);
+          background: var(--panel);
+          border: 1px solid var(--panel-border);
+          border-radius: 6px;
+          padding: 3px 7px;
+          cursor: pointer;
+          transition: border-color 0.2s ease, color 0.2s ease;
+        }
+        .containers-btn:hover { color: var(--text); border-color: var(--panel-hover-border); }
+        .containers-btn:focus-visible { outline: 2px solid var(--online); outline-offset: 2px; }
+        .containers-btn .flip { transform: rotate(180deg); }
+
+        .containers {
+          background: var(--panel);
+          border: 1px solid var(--panel-border);
+          border-radius: 10px;
+          padding: 8px 14px;
+          margin-bottom: 14px;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 12px;
+        }
+        .containers-row {
+          display: grid;
+          grid-template-columns: 1fr 80px 80px;
+          gap: 12px;
+          padding: 5px 0;
+          border-bottom: 1px solid var(--panel-border);
+        }
+        .containers-row:last-child { border-bottom: none; }
+        .containers-row > span:not(.c-name) { text-align: right; color: var(--text-muted); }
+        .containers-head { font-size: 10.5px; color: var(--text-faint); }
+        .containers-head > span:not(.c-name) { color: var(--text-faint); }
+        .c-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         .grid {
           display: grid;
@@ -558,6 +738,8 @@ export default function RinconMenu() {
           .rincon-root { padding: 36px 18px 30px; }
           .greeting { font-size: 25px; }
           .grid { grid-template-columns: 1fr; }
+          .section-head { flex-wrap: wrap; }
+          .machine-stats { width: 100%; flex-wrap: wrap; gap: 8px 14px; }
         }
       `}</style>
 
@@ -615,21 +797,33 @@ export default function RinconMenu() {
           </div>
         )}
 
-        {filteredGroups.map((group) => (
-          <div className="section" key={group.id}>
-            <div className="section-head">
-              <group.Icon size={13} />
-              <span className="section-title">{group.label.toUpperCase()}</span>
-              <span className="count-badge">{group.apps.length}</span>
-              <div className="section-line" />
+        {filteredGroups.map((group) => {
+          const sys = systems[group.id];
+          const showContainers = openContainers.has(group.id) && sys?.containers;
+          return (
+            <div className="section" key={group.id}>
+              <div className="section-head">
+                <group.Icon size={13} />
+                <span className="section-title">{group.label.toUpperCase()}</span>
+                <span className="count-badge">{group.apps.length}</span>
+                <div className="section-line" />
+                {sys && (
+                  <MachineStats
+                    sys={sys}
+                    open={openContainers.has(group.id)}
+                    onToggle={() => toggleContainers(group.id)}
+                  />
+                )}
+              </div>
+              {showContainers && <ContainerList containers={sys.containers} />}
+              <div className="grid">
+                {group.apps.map((app) => (
+                  <AppCard key={app.id} app={app} isFav={favorites.has(app.id)} onToggleFav={toggleFavorite} status={statuses[app.id] || "checking"} />
+                ))}
+              </div>
             </div>
-            <div className="grid">
-              {group.apps.map((app) => (
-                <AppCard key={app.id} app={app} isFav={favorites.has(app.id)} onToggleFav={toggleFavorite} status={statuses[app.id] || "checking"} />
-              ))}
-            </div>
-          </div>
-        ))}
+          );
+        })}
 
         <div className="footer">
           <span>Rincon · Painel Pessoal</span>

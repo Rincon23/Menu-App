@@ -7,6 +7,7 @@ Hub pessoal de apps — `menu.rincon.dev.br`.
 rincon-menu-app/
 ├── Dockerfile          # build multi-stage: Node builda, Nginx serve
 ├── docker-compose.yml  # sobe os dois containers (site + checador)
+├── docker-compose.agent.yml  # agente de métricas pra rodar no Servidor
 ├── nginx.conf          # config do Nginx: serve o site e faz proxy de /api pro checador
 ├── index.html
 ├── package.json
@@ -40,6 +41,46 @@ Por segurança (anti-SSRF) o checador só aceita hosts dentro de
 `.rincon.dev.br` — ajuste `ALLOWED_HOST_SUFFIX` no `docker-compose.yml` se
 mudar de domínio. Hosts públicos extras que aparecem no menu (ex.:
 `cloudflare.com`) ficam em `ALLOWED_EXACT_HOSTS` (lista separada por vírgula).
+
+## RAM, disco e containers de cada seção
+
+As seções **Orange Pi** e **Servidor** mostram no cabeçalho a RAM e o disco
+da máquina, e um botão (ícone de caixa + número) que abre a lista dos
+containers rodando com a RAM e o disco de cada um. Atualiza a cada 30s.
+
+- **RAM do container** = mesma conta do `docker stats`.
+- **Disco do container** = imagem + camada gravável + volumes nomeados.
+  Pastas do host montadas direto (bind mounts, tipo a mídia do Jellyfin)
+  não entram na conta.
+- **Disco da máquina** = o disco onde o Docker guarda os dados.
+
+Como funciona: o checador lê as métricas do próprio host (precisa do
+`/var/run/docker.sock` montado, já está no `docker-compose.yml`). Pro
+Servidor, roda no Servidor um "agente" (o mesmo checador) e o checador do
+Orange Pi busca as métricas dele pelo Tailscale, protegido por um token.
+
+### Configurar (uma vez)
+
+1. Gere um token (qualquer máquina): `openssl rand -hex 24`
+2. **No Servidor**: clone o repo, crie o `.env` e suba o agente:
+   ```bash
+   git clone https://github.com/Rincon23/Menu-App.git
+   cd Menu-App
+   echo "AGENT_TOKEN=COLE_O_TOKEN_AQUI" > .env
+   docker compose -f docker-compose.agent.yml up -d --build
+   ```
+   (porta `3002` no host — troque no `docker-compose.agent.yml` se já estiver em uso)
+3. **No Orange Pi**: crie o `.env` ao lado do `docker-compose.yml` (modelo em
+   `.env.example`) com o mesmo token e o IP do Servidor no Tailscale
+   (`tailscale ip -4` no Servidor). Use o IP `100.x`, não o nome MagicDNS —
+   de dentro do container o nome pode não resolver.
+   ```
+   AGENT_TOKEN=COLE_O_TOKEN_AQUI
+   SERVIDOR_AGENT_URL=http://100.x.y.z:3002
+   ```
+   Depois `./update.sh`.
+
+Se o agente não responder, a seção mostra "métricas indisponíveis".
 
 ## Editar os apps
 Abra `src/RinconMenu.jsx` e edite o array `GROUPS` no topo do arquivo. Cada grupo vira uma seção na página:

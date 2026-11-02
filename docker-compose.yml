@@ -33,6 +33,15 @@ services:
     environment:
       # Só deixa checar hosts dentro desse sufixo (trava SSRF).
       - ALLOWED_HOST_SUFFIX=.rincon.dev.br
+      # Métricas (RAM / disco / containers): esta máquina é a seção "orangepi"
+      # do menu; as do Servidor vêm do agente dele (docker-compose.agent.yml)
+      # pelo Tailscale. SERVIDOR_AGENT_URL e AGENT_TOKEN ficam no arquivo .env.
+      - MACHINE_ID=orangepi
+      - REMOTE_AGENTS=servidor=${SERVIDOR_AGENT_URL:-}
+      - AGENT_TOKEN=${AGENT_TOKEN:-}
+    volumes:
+      # Só leitura das estatísticas dos containers (RAM e tamanho em disco).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     # networks:
     #   - default
 
