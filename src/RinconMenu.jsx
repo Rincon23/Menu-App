@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Search, Star, Moon, Sun, KeyRound, Box, RefreshCw, GitBranch,
   ExternalLink, Cpu, Server, Globe, Pin, Film, Cloud, Wallet, Video,
-  Container, ChevronDown,
+  Container, ChevronDown, Briefcase,
 } from "lucide-react";
 
 const GROUPS = [
@@ -132,6 +132,15 @@ const GROUPS = [
         domain: "cloudflare.com",
         accent: "#F38020",
         Icon: Globe,
+      },
+      {
+        id: "portfolio",
+        name: "Portfólio",
+        desc: "Meu portfólio no GitHub Pages",
+        url: "https://rincon23.github.io/",
+        domain: "rincon23.github.io",
+        accent: "#8B5CF6",
+        Icon: Briefcase,
       },
     ],
   },
