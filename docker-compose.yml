@@ -39,8 +39,9 @@ services:
       - MACHINE_ID=orangepi
       - REMOTE_AGENTS=servidor=${SERVIDOR_AGENT_URL:-}
       - AGENT_TOKEN=${AGENT_TOKEN:-}
-      # Senha do login do menu (no .env). Sem ela o login fica desligado.
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Hash da senha do login (no .env; crie com ./definir-senha.sh — a
+      # senha em si não fica salva). Sem ele o login fica desligado.
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-}
       # Chave do 2FA (no .env; gere com: node server/totp.js). Com ela o
       # login pede também o código do app autenticador.
       - ADMIN_TOTP_SECRET=${ADMIN_TOTP_SECRET:-}

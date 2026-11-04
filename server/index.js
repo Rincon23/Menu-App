@@ -26,11 +26,12 @@ const ORIGIN_DOWN_STATUS = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525,
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { statfs, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { WebSocketServer, WebSocket } from "ws";
 import { decodeBase32, verifyTotp } from "./totp.js";
+import { parseHash, verifyPassword } from "./password.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 const ALLOWED_HOST_SUFFIX = process.env.ALLOWED_HOST_SUFFIX || ".rincon.dev.br";
@@ -280,14 +281,20 @@ async function collectSystem() {
 }
 
 // --- Login do dono -----------------------------------------------------------
-// Uma senha só (ADMIN_PASSWORD no .env); sem ela o login fica desligado. Com
-// ADMIN_TOTP_SECRET também pede o código de 2 fatores (ver totp.js).
+// Uma senha só, guardada no .env apenas como hash (ADMIN_PASSWORD_HASH, criado
+// pelo definir-senha.sh — ver password.js); sem ela o login fica desligado.
+// Com ADMIN_TOTP_SECRET também pede o código de 2 fatores (ver totp.js).
 // Logado dá pra reorganizar / ocultar / adicionar links e abrir o terminal.
 // A sessão é um cookie assinado com HMAC, sem banco: "<expira-em-ms>.<assinatura>".
-// Trocar a senha ou a chave 2FA derruba todas as sessões abertas.
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+// A chave do HMAC fica no volume de dados (SESSION_KEY_FILE), não no .env:
+// quem conseguir só o .env não forja uma sessão. Trocar a senha ou a chave
+// 2FA derruba todas as sessões abertas.
+const ADMIN_PASSWORD_HASH = (process.env.ADMIN_PASSWORD_HASH || "").trim();
+const PASSWORD_HASH = ADMIN_PASSWORD_HASH ? parseHash(ADMIN_PASSWORD_HASH) : null;
 const ADMIN_TOTP_SECRET = (process.env.ADMIN_TOTP_SECRET || "").trim();
 const TOTP_KEY = ADMIN_TOTP_SECRET ? decodeBase32(ADMIN_TOTP_SECRET) : null;
+/** @type {Buffer | null} carregada antes do server.listen */
+let sessionKey = null;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_LOGIN_FAILS = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
@@ -298,7 +305,8 @@ const loginFails = new Map();
 let lastTotpStep = 0;
 
 function loginProblem() {
-  if (!ADMIN_PASSWORD) return "login desligado: defina ADMIN_PASSWORD no .env";
+  if (!ADMIN_PASSWORD_HASH) return "login desligado: defina a senha com ./definir-senha.sh no Orange Pi";
+  if (!PASSWORD_HASH) return "login desligado: ADMIN_PASSWORD_HASH inválida no .env";
   if (ADMIN_TOTP_SECRET && !TOTP_KEY) return "login desligado: ADMIN_TOTP_SECRET inválida no .env";
   return null;
 }
@@ -312,11 +320,13 @@ function safeEqual(a, b) {
 }
 
 function sign(value) {
-  return createHmac("sha256", `rincon-menu-session:${ADMIN_PASSWORD}:${ADMIN_TOTP_SECRET}`).update(value).digest("base64url");
+  return createHmac("sha256", sessionKey)
+    .update(`${ADMIN_PASSWORD_HASH}:${ADMIN_TOTP_SECRET}:${value}`)
+    .digest("base64url");
 }
 
 function isAdmin(req) {
-  if (loginProblem()) return false;
+  if (loginProblem() || !sessionKey) return false;
   const m = /(?:^|;\s*)rm_session=([^;]+)/.exec(req.headers.cookie || "");
   if (!m) return false;
   const [exp, sig] = m[1].split(".");
@@ -368,6 +378,7 @@ function agentAuthorized(req) {
 // null e o front usa a lista padrão do RinconMenu.jsx.
 const DATA_DIR = process.env.DATA_DIR || "./data";
 const LINKS_FILE = path.join(DATA_DIR, "links.json");
+const SESSION_KEY_FILE = path.join(DATA_DIR, "session.key");
 
 const ID_RE = /^[a-z0-9-]{1,60}$/;
 const ICON_RE = /^[A-Za-z0-9]{1,40}$/;
@@ -659,7 +670,7 @@ async function handle(req, res) {
       const ip = clientIp(req);
       if (loginLocked(ip)) return sendJson(res, 429, { error: "muitas tentativas, espere 15 minutos" });
       const body = await readJson(req);
-      const passwordOk = typeof body?.password === "string" && safeEqual(body.password, ADMIN_PASSWORD);
+      const passwordOk = typeof body?.password === "string" && (await verifyPassword(PASSWORD_HASH, body.password));
       const step = TOTP_KEY ? verifyTotp(TOTP_KEY, body?.code) : null;
       const codeOk = !TOTP_KEY || (step !== null && step > lastTotpStep);
       // Não diz qual dos dois errou.
@@ -734,6 +745,23 @@ server.on("upgrade", (req, socket, head) => {
     open(ws);
   });
 });
+
+// Chave das sessões: criada uma vez e guardada no volume (no host, só o root
+// lê), pra sessão sobreviver a um ./update.sh.
+async function loadSessionKey() {
+  try {
+    const key = await readFile(SESSION_KEY_FILE);
+    if (key.length >= 32) return key;
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  const key = randomBytes(32);
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(SESSION_KEY_FILE, key, { mode: 0o600 });
+  return key;
+}
+
+if (!loginProblem()) sessionKey = await loadSessionKey();
 
 server.listen(PORT, () => {
   console.log(`[rincon-menu-checker] ouvindo em :${PORT}`);

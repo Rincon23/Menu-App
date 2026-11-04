@@ -14,7 +14,10 @@ rincon-menu-app/
 ├── vite.config.js
 ├── server/             # checador (Node; única dependência: ws)
 │   ├── index.js        # status, métricas, login, layout dos links e terminal
+│   ├── password.js     # hash da senha (scrypt) — usado pelo definir-senha.sh
+│   ├── totp.js         # 2FA (código de 6 dígitos); "node totp.js" gera chave
 │   └── Dockerfile
+├── definir-senha.sh    # define a senha do login (grava só o hash no .env)
 └── src/
     ├── main.jsx         # entry point
     ├── RinconMenu.jsx   # o componente da página (e a lista padrão de apps)
@@ -39,14 +42,16 @@ superior direito) e digitando a senha e o código de 2 fatores, aparecem:
 
 ### Configurar (uma vez)
 
-1. **No Orange Pi**, acrescente a senha no `.env` (gere uma forte, ela dá
-   root nas duas máquinas): `openssl rand -base64 18`
+1. **No Orange Pi**, com o menu atualizado (`./update.sh`), defina a senha:
+   ```bash
+   ./definir-senha.sh
    ```
-   ADMIN_PASSWORD=COLE_A_SENHA_AQUI
-   ```
+   Ele pede a senha duas vezes (mínimo 12 caracteres; use uma forte, ela dá
+   root nas duas máquinas) e grava no `.env` **só o hash** dela
+   (`ADMIN_PASSWORD_HASH`, scrypt) — quem ler o `.env` não descobre a senha.
+   Rode de novo sempre que quiser trocar.
    Opcional, nas duas máquinas: `TERMINAL_USER=orangepi` (ou o seu usuário)
-   pra o terminal abrir nele em vez de `root`.
-   Depois `./update.sh`.
+   no `.env` pra o terminal abrir nele em vez de `root`.
 2. **2 fatores (2FA)**: gere uma chave com o menu já atualizado rodando:
    ```bash
    docker compose exec rincon-menu-checker node totp.js
@@ -71,9 +76,15 @@ superior direito) e digitando a senha e o código de 2 fatores, aparecem:
 
 - Login = senha + código 2FA (TOTP, o mesmo padrão do Google Authenticator);
   um código já usado não entra de novo.
-- A sessão é um cookie assinado (30 dias, `HttpOnly`, `SameSite=Strict`);
-  trocar a `ADMIN_PASSWORD` ou a `ADMIN_TOTP_SECRET` derruba todas. 5
-  tentativas erradas seguidas bloqueiam o IP por 15 minutos.
+- O `.env` tem só o hash da senha. A chave 2FA fica em texto lá porque o
+  servidor precisa dela pra calcular o código (cifrar com uma chave guardada
+  na mesma máquina não protegeria nada) — sozinha, sem a senha, não entra.
+- A sessão é um cookie assinado (30 dias, `HttpOnly`, `SameSite=Strict`) com
+  uma chave guardada no volume de dados (`session.key`), não no `.env`.
+  Trocar a senha ou a `ADMIN_TOTP_SECRET` derruba todas. 5 tentativas erradas
+  seguidas bloqueiam o IP por 15 minutos.
+- O `.env` do Orange Pi também tem o `AGENT_TOKEN`, que abre o terminal do
+  Servidor: deixe-o só pro seu usuário (`chmod 600 .env`).
 - O checador recusa pedidos de outros sites (confere o `Origin`), inclusive
   de outros `*.rincon.dev.br`.
 - Recomendado: proteger o caminho `menu.rincon.dev.br/api/terminal` com uma
@@ -178,9 +189,11 @@ Pra testar o indicador de status junto, suba o checador em outro terminal
 ```bash
 cd server && npm install && npm start   # sobe em http://localhost:3001
 ```
-Pra testar o login, suba o checador com `ADMIN_PASSWORD=uma-senha npm start`
-(no PowerShell: `$env:ADMIN_PASSWORD="uma-senha"` antes do `npm start`). O
-terminal precisa de Docker na máquina.
+Pra testar o login, gere um hash com
+`printf %s "uma-senha-de-teste" | node password.js` (dentro de `server/`) e
+suba o checador com `ADMIN_PASSWORD_HASH=<o hash> npm start` (no PowerShell:
+`$env:ADMIN_PASSWORD_HASH="<o hash>"` antes do `npm start`). O terminal
+precisa de Docker na máquina.
 
 ## Build e deploy com Docker
 
