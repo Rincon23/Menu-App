@@ -5,9 +5,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     // Em dev, encaminha /api pro checador rodando localmente
-    // (cd server && npm start).
+    // (cd server && npm start) — inclusive o WebSocket do terminal.
     proxy: {
-      "/api": "http://localhost:3001",
+      "/api": { target: "http://localhost:3001", ws: true },
     },
   },
 });

@@ -1,7 +1,8 @@
 FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-# Sem dependências externas — usa só os módulos nativos do Node 20.
-COPY index.js ./
+# Única dependência: "ws" (WebSocket do terminal). O resto é Node puro.
+RUN npm ci --omit=dev
+COPY index.js totp.js ./
 EXPOSE 3001
 CMD ["node", "index.js"]

@@ -1,15 +1,31 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, lazy, Suspense } from "react";
 import {
   Search, Star, Moon, Sun, KeyRound, Box, RefreshCw, GitBranch,
   ExternalLink, Cpu, Server, Globe, Pin, Film, Cloud, Wallet, Video,
-  Container, ChevronDown, Briefcase,
+  Container, ChevronDown, Briefcase, Home, Database, HardDrive, Monitor,
+  Music, Image, Camera, Mail, Calendar, Newspaper, BookOpen, Gamepad2,
+  Code, Bot, Shield, Link, LogIn, LogOut, Pencil, Eye, EyeOff,
+  GripVertical, Plus, X, Trash2, SquareTerminal,
 } from "lucide-react";
 
-const GROUPS = [
+// Só quem está logado e abre o terminal baixa o xterm.js.
+const TerminalPanel = lazy(() => import("./TerminalPanel.jsx"));
+
+// Ícones que dá pra usar nos links — o layout salvo guarda só o nome.
+const ICONS = {
+  Globe, Box, RefreshCw, GitBranch, KeyRound, Wallet, Film, Cloud, Video,
+  Briefcase, Cpu, Server, Home, Database, HardDrive, Monitor, Music, Image,
+  Camera, Mail, Calendar, Newspaper, BookOpen, Gamepad2, Code, Bot, Shield, Link,
+};
+
+// Layout padrão. Depois que você salva algo no modo edição (ordem, ocultar,
+// adicionar), vale o layout salvo no servidor (/api/links) e esta lista só é
+// usada se o checador estiver fora do ar no primeiro acesso.
+const DEFAULT_GROUPS = [
   {
     id: "orangepi",
     label: "Orange Pi",
-    Icon: Cpu,
+    icon: "Cpu",
     apps: [
       {
         id: "portainer",
@@ -18,7 +34,7 @@ const GROUPS = [
         url: "https://portainer.rincon.dev.br/#!/auth",
         domain: "portainer.rincon.dev.br",
         accent: "#17C3E6",
-        Icon: Box,
+        icon: "Box",
       },
       {
         id: "syncthing",
@@ -27,7 +43,7 @@ const GROUPS = [
         url: "https://sync-orangepi.rincon.dev.br/",
         domain: "sync-orangepi.rincon.dev.br",
         accent: "#14B8A6",
-        Icon: RefreshCw,
+        icon: "RefreshCw",
       },
       {
         id: "n8n",
@@ -36,7 +52,7 @@ const GROUPS = [
         url: "https://n8n.rincon.dev.br/home/workflows",
         domain: "n8n.rincon.dev.br",
         accent: "#FF6B4A",
-        Icon: GitBranch,
+        icon: "GitBranch",
       },
       {
         id: "vaultwarden",
@@ -45,7 +61,7 @@ const GROUPS = [
         url: "https://senhas.rincon.dev.br/#/login",
         domain: "senhas.rincon.dev.br",
         accent: "#3B6FE0",
-        Icon: KeyRound,
+        icon: "KeyRound",
       },
       {
         id: "capital",
@@ -54,14 +70,14 @@ const GROUPS = [
         url: "https://capital.rincon.dev.br/",
         domain: "capital.rincon.dev.br",
         accent: "#22C55E",
-        Icon: Wallet,
+        icon: "Wallet",
       },
     ],
   },
   {
     id: "servidor",
     label: "Servidor",
-    Icon: Server,
+    icon: "Server",
     apps: [
       {
         id: "portainer-server",
@@ -70,7 +86,7 @@ const GROUPS = [
         url: "https://portainer-server.rincon.dev.br/#!/auth",
         domain: "portainer-server.rincon.dev.br",
         accent: "#17C3E6",
-        Icon: Box,
+        icon: "Box",
       },
       {
         id: "n8n-server",
@@ -79,7 +95,7 @@ const GROUPS = [
         url: "https://n8n-server.rincon.dev.br/signin?redirect=%252F",
         domain: "n8n-server.rincon.dev.br",
         accent: "#FF6B4A",
-        Icon: GitBranch,
+        icon: "GitBranch",
       },
       {
         id: "jellyfin",
@@ -88,7 +104,7 @@ const GROUPS = [
         url: "https://jellyfin.rincon.dev.br/web/#/home",
         domain: "jellyfin.rincon.dev.br",
         accent: "#AA5CC3",
-        Icon: Film,
+        icon: "Film",
       },
       {
         id: "nextcloud",
@@ -97,7 +113,7 @@ const GROUPS = [
         url: "https://cloud.rincon.dev.br/login",
         domain: "cloud.rincon.dev.br",
         accent: "#0082C9",
-        Icon: Cloud,
+        icon: "Cloud",
       },
       {
         id: "syncthing-server",
@@ -106,7 +122,7 @@ const GROUPS = [
         url: "https://sync-server.rincon.dev.br/",
         domain: "sync-server.rincon.dev.br",
         accent: "#14B8A6",
-        Icon: RefreshCw,
+        icon: "RefreshCw",
       },
       {
         id: "live",
@@ -115,14 +131,14 @@ const GROUPS = [
         url: "https://live.rincon.dev.br/",
         domain: "live.rincon.dev.br",
         accent: "#E5484D",
-        Icon: Video,
+        icon: "Video",
       },
     ],
   },
   {
     id: "rede",
     label: "Rede · sites úteis",
-    Icon: Globe,
+    icon: "Globe",
     apps: [
       {
         id: "cloudflare",
@@ -131,7 +147,7 @@ const GROUPS = [
         url: "https://www.cloudflare.com/pt-br/",
         domain: "cloudflare.com",
         accent: "#F38020",
-        Icon: Globe,
+        icon: "Globe",
       },
       {
         id: "portfolio",
@@ -140,7 +156,7 @@ const GROUPS = [
         url: "https://rincon23.github.io/",
         domain: "rincon23.github.io",
         accent: "#8B5CF6",
-        Icon: Briefcase,
+        icon: "Briefcase",
       },
     ],
   },
@@ -171,6 +187,60 @@ async function fetchSystems(signal) {
   return data.machines || {};
 }
 
+// GET/POST/PUT em JSON; erro com a mensagem que o checador mandou.
+async function api(path, { method = "GET", body, signal } = {}) {
+  const res = await fetch(path, {
+    method,
+    signal,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body && JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || `checador respondeu ${res.status}`), { status: res.status });
+  return data;
+}
+
+// Último layout recebido fica no navegador, pra página abrir já na ordem
+// certa (sem piscar a lista padrão enquanto /api/links responde).
+const LAYOUT_KEY = "rincon-menu-layout";
+
+function cachedLayout() {
+  try {
+    const groups = JSON.parse(localStorage.getItem(LAYOUT_KEY));
+    if (Array.isArray(groups) && groups.every((g) => Array.isArray(g.apps))) return groups;
+  } catch {}
+  return DEFAULT_GROUPS;
+}
+
+// Tira o app de onde está e põe no lugar do alvo (ou no fim do grupo, sem
+// alvo). Arrastando pra frente ele fica depois do alvo, pra trás fica antes.
+function moveApp(groups, appId, toGroupId, targetId = null) {
+  const app = groups.flatMap((g) => g.apps).find((a) => a.id === appId);
+  const dest = groups.find((g) => g.id === toGroupId);
+  if (!app || !dest || appId === targetId) return groups;
+  const index = targetId ? dest.apps.findIndex((a) => a.id === targetId) : dest.apps.length;
+  return groups.map((g) => {
+    const apps = g.apps.filter((a) => a.id !== appId);
+    if (g.id === toGroupId) apps.splice(index === -1 ? apps.length : index, 0, app);
+    return { ...g, apps };
+  });
+}
+
+function updateApp(groups, appId, fn) {
+  return groups.map((g) => ({ ...g, apps: g.apps.flatMap((a) => (a.id === appId ? fn(a) : [a])) }));
+}
+
+function newAppId(name) {
+  const slug = name
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+  return `${slug || "link"}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
 function formatBytes(bytes) {
   if (bytes == null) return "—";
   const gb = bytes / 2 ** 30;
@@ -187,7 +257,7 @@ function greeting(hour) {
 }
 
 function AppIcon({ app }) {
-  const { Icon } = app;
+  const Icon = ICONS[app.icon] ?? Globe;
   return (
     <span className="app-icon-fallback" style={{ background: app.accent + "22", color: app.accent }}>
       <Icon size={20} strokeWidth={1.75} />
@@ -202,30 +272,57 @@ const STATUS_LABEL = {
   unknown: "Não foi possível verificar",
 };
 
-function AppCard({ app, isFav, onToggleFav, status = "checking" }) {
+// Botão dentro do card (que é um link): não deixa o clique abrir o link.
+function cardAction(fn) {
+  return (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
+  };
+}
+
+// No modo edição (edit != null) o card dá pra arrastar e mostra os botões de
+// ocultar e editar no lugar da estrela.
+function AppCard({ app, isFav, onToggleFav, status = "checking", edit }) {
   return (
     <a
       href={app.url}
       target="_blank"
       rel="noopener noreferrer"
-      className="app-card"
+      className={`app-card ${edit ? "editable" : ""} ${app.hidden ? "is-hidden" : ""} ${edit?.dragging ? "dragging" : ""}`}
       style={{ "--accent": app.accent, "--accent-glow": app.accent + "33" }}
+      draggable={edit ? true : undefined}
+      onDragStart={edit?.onDragStart}
+      onDragEnter={edit?.onDragEnter}
     >
       <div className="app-card-top">
         <AppIcon app={app} />
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span className={`status-dot ${status}`} title={STATUS_LABEL[status]} />
-          <button
-            className={`fav-btn ${isFav ? "active" : ""}`}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onToggleFav(app.id);
-            }}
-            aria-label={isFav ? "Remover dos favoritos" : "Adicionar aos favoritos"}
-          >
-            <Star size={15} fill={isFav ? "currentColor" : "none"} strokeWidth={1.75} />
-          </button>
+          {edit ? (
+            <>
+              <button
+                className="fav-btn"
+                onClick={cardAction(edit.onToggleHidden)}
+                title={app.hidden ? "Mostrar" : "Ocultar"}
+                aria-label={app.hidden ? `Mostrar ${app.name}` : `Ocultar ${app.name}`}
+              >
+                {app.hidden ? <EyeOff size={15} strokeWidth={1.75} /> : <Eye size={15} strokeWidth={1.75} />}
+              </button>
+              <button className="fav-btn" onClick={cardAction(edit.onEdit)} title="Editar" aria-label={`Editar ${app.name}`}>
+                <Pencil size={14} strokeWidth={1.75} />
+              </button>
+              <GripVertical size={15} className="grip" aria-hidden="true" />
+            </>
+          ) : (
+            <button
+              className={`fav-btn ${isFav ? "active" : ""}`}
+              onClick={cardAction(() => onToggleFav(app.id))}
+              aria-label={isFav ? "Remover dos favoritos" : "Adicionar aos favoritos"}
+            >
+              <Star size={15} fill={isFav ? "currentColor" : "none"} strokeWidth={1.75} />
+            </button>
+          )}
         </div>
       </div>
       <div>
@@ -292,6 +389,183 @@ function ContainerList({ containers }) {
   );
 }
 
+function Dialog({ title, onClose, children }) {
+  return (
+    <div
+      className="overlay"
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+      onKeyDown={(e) => e.key === "Escape" && onClose()}
+    >
+      <div className="dialog" role="dialog" aria-modal="true" aria-label={title}>
+        <div className="dialog-head">
+          <span className="section-title">{title.toUpperCase()}</span>
+          <button className="theme-btn" onClick={onClose} aria-label="Fechar">
+            <X size={15} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// totp: o checador pede também o código de 2 fatores (ADMIN_TOTP_SECRET).
+function LoginDialog({ totp, onClose, onLoggedIn }) {
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api("/api/login", { method: "POST", body: { password, code } });
+      onLoggedIn();
+    } catch (err) {
+      setError(err.message);
+      setCode("");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog title="Entrar" onClose={onClose}>
+      <form className="form" onSubmit={submit}>
+        <label className="field">
+          <span>senha</span>
+          <input
+            className="search-input"
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        {totp && (
+          <label className="field">
+            <span>código do autenticador (2FA)</span>
+            <input
+              className="search-input"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              placeholder="000000"
+              maxLength={6}
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+            />
+          </label>
+        )}
+        {error && <p className="form-error">{error}</p>}
+        <div className="form-actions">
+          <button className="btn primary" disabled={busy || !password || (totp && code.length !== 6)}>
+            {busy ? "entrando..." : "entrar"}
+          </button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+// Adicionar (app == null) ou editar um link.
+function AppDialog({ groups, groupId, app, onSave, onDelete, onClose }) {
+  const [form, setForm] = useState(() => ({
+    name: app?.name ?? "",
+    desc: app?.desc ?? "",
+    url: app?.url ?? "https://",
+    groupId,
+    icon: app?.icon ?? "Globe",
+    accent: app?.accent ?? "#3B6FE0",
+  }));
+  const [error, setError] = useState("");
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  function submit(e) {
+    e.preventDefault();
+    let url;
+    try {
+      url = new URL(form.url.trim());
+    } catch {
+      return setError("URL inválida");
+    }
+    if (url.protocol !== "https:" && url.protocol !== "http:") return setError("a URL precisa começar com http:// ou https://");
+    onSave(
+      {
+        ...app,
+        id: app?.id ?? newAppId(form.name),
+        name: form.name.trim(),
+        desc: form.desc.trim(),
+        url: url.href,
+        domain: url.hostname,
+        icon: form.icon,
+        accent: form.accent,
+      },
+      form.groupId
+    );
+  }
+
+  return (
+    <Dialog title={app ? "Editar link" : "Adicionar link"} onClose={onClose}>
+      <form className="form" onSubmit={submit}>
+        <label className="field">
+          <span>nome</span>
+          <input className="search-input" required maxLength={80} autoFocus value={form.name} onChange={set("name")} />
+        </label>
+        <label className="field">
+          <span>descrição</span>
+          <input className="search-input" maxLength={200} value={form.desc} onChange={set("desc")} />
+        </label>
+        <label className="field">
+          <span>url</span>
+          <input className="search-input" required maxLength={2000} value={form.url} onChange={set("url")} />
+        </label>
+        <div className="field-row">
+          <label className="field">
+            <span>seção</span>
+            <select className="search-input" value={form.groupId} onChange={set("groupId")}>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>{g.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="field color-field">
+            <span>cor</span>
+            <input type="color" value={form.accent} onChange={set("accent")} />
+          </label>
+        </div>
+        <div className="field">
+          <span>ícone</span>
+          <div className="icon-picker">
+            {Object.entries(ICONS).map(([name, Icon]) => (
+              <button
+                type="button"
+                key={name}
+                className={form.icon === name ? "active" : ""}
+                onClick={() => setForm((f) => ({ ...f, icon: name }))}
+                aria-label={name}
+                aria-pressed={form.icon === name}
+              >
+                <Icon size={16} strokeWidth={1.75} />
+              </button>
+            ))}
+          </div>
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <div className="form-actions">
+          {app && (
+            <button type="button" className="btn danger" onClick={onDelete}>
+              <Trash2 size={13} /> excluir
+            </button>
+          )}
+          <button className="btn primary">salvar</button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
 export default function RinconMenu() {
   const [theme, setTheme] = useState("dark");
   const [now, setNow] = useState(new Date());
@@ -301,13 +575,59 @@ export default function RinconMenu() {
   const [statuses, setStatuses] = useState({});
   const [systems, setSystems] = useState({});
   const [openContainers, setOpenContainers] = useState(() => new Set());
+  const [groups, setGroups] = useState(cachedLayout);
+  const [me, setMe] = useState({ admin: false, loginEnabled: false, totp: false, terminals: [] });
+  const [editing, setEditing] = useState(false);
+  const [dragId, setDragId] = useState(null);
+  // { type: "login" } | { type: "app", groupId, app? }
+  const [dialog, setDialog] = useState(null);
+  const [terminal, setTerminal] = useState(null);
+  const [notice, setNotice] = useState("");
   const searchRef = useRef(null);
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
+  const dragStartRef = useRef(null);
   const reduceMotion = useMemo(
     () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
     []
   );
 
-  const allApps = useMemo(() => GROUPS.flatMap((g) => g.apps), []);
+  const allApps = useMemo(() => groups.flatMap((g) => g.apps), [groups]);
+  const appsRef = useRef(allApps);
+  appsRef.current = allApps;
+  // Só refaz a checagem de status quando muda a lista de URLs (não a ordem).
+  const statusKey = allApps.map((a) => `${a.id} ${a.url}`).sort().join("\n");
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(groups));
+    } catch {}
+  }, [groups]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(""), 5000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  // Quem sou eu (logado?) e o layout salvo. Roda de novo depois de entrar/sair,
+  // porque logado o layout vem com os links ocultos.
+  async function loadSession(signal) {
+    try {
+      const [session, links] = await Promise.all([api("/api/me", { signal }), api("/api/links", { signal })]);
+      setMe(session);
+      setGroups(links.groups ?? DEFAULT_GROUPS);
+      if (!session.admin) setEditing(false);
+    } catch (err) {
+      if (err.name !== "AbortError") console.warn("checador indisponível:", err.message);
+    }
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    loadSession(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -323,6 +643,7 @@ export default function RinconMenu() {
     const controller = new AbortController();
 
     async function runChecks() {
+      const allApps = appsRef.current;
       setStatuses((prev) => {
         const next = { ...prev };
         for (const app of allApps) if (!next[app.id]) next[app.id] = "checking";
@@ -356,7 +677,7 @@ export default function RinconMenu() {
       controller.abort();
       clearInterval(t);
     };
-  }, [allApps]);
+  }, [statusKey]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -411,23 +732,98 @@ export default function RinconMenu() {
     });
   }
 
+  async function logout() {
+    await api("/api/logout", { method: "POST" }).catch(() => {});
+    setMe((m) => ({ ...m, admin: false, terminals: [] }));
+    setEditing(false);
+    setTerminal(null);
+    loadSession();
+  }
+
+  // Mostra na hora e salva no servidor; se falhar, avisa e recarrega o que
+  // está salvo lá.
+  async function persist(next) {
+    setGroups(next);
+    try {
+      await api("/api/links", { method: "PUT", body: { groups: next } });
+    } catch (err) {
+      setNotice(`Não salvou: ${err.message}`);
+      loadSession();
+    }
+  }
+
+  function saveApp(app, groupId) {
+    const from = groups.find((g) => g.apps.some((a) => a.id === app.id));
+    let next = from
+      ? updateApp(groups, app.id, () => [app])
+      : groups.map((g) => (g.id === groupId ? { ...g, apps: [...g.apps, app] } : g));
+    if (from && from.id !== groupId) next = moveApp(next, app.id, groupId);
+    persist(next);
+    setDialog(null);
+  }
+
+  function deleteApp(app) {
+    if (!window.confirm(`Excluir "${app.name}"? (pra só esconder, use o olho)`)) return;
+    persist(updateApp(groups, app.id, () => []));
+    setDialog(null);
+  }
+
+  // Arrastar: o card muda de lugar ao passar por cima dos outros (ou do "+"
+  // no fim de uma seção) e o layout é salvo ao soltar.
+  function dragTo(groupId, targetId) {
+    if (dragId) setGroups((g) => moveApp(g, dragId, groupId, targetId));
+  }
+
+  function endDrag() {
+    setDragId(null);
+    if (JSON.stringify(dragStartRef.current) !== JSON.stringify(groupsRef.current)) persist(groupsRef.current);
+  }
+
+  function editProps(app, groupId) {
+    return {
+      dragging: dragId === app.id,
+      onDragStart: (e) => {
+        dragStartRef.current = groups;
+        setDragId(app.id);
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", app.name);
+        // Listener nativo, não o onDragEnd do React: quando o card muda de
+        // seção o React troca o elemento, e o dragend do original (que saiu
+        // da página) não chega mais no React.
+        e.currentTarget.addEventListener("dragend", endDrag, { once: true });
+      },
+      onDragEnter: () => dragTo(groupId, app.id),
+      onToggleHidden: () => persist(updateApp(groups, app.id, (a) => [{ ...a, hidden: !a.hidden }])),
+      onEdit: () => setDialog({ type: "app", groupId, app }),
+    };
+  }
+
   const q = query.trim().toLowerCase();
   const matches = (app) =>
-    !q || app.name.toLowerCase().includes(q) || app.desc.toLowerCase().includes(q);
+    (editing || !app.hidden) &&
+    (!q || app.name.toLowerCase().includes(q) || app.desc.toLowerCase().includes(q));
 
-  const filteredGroups = GROUPS.map((g) => ({
+  const filteredGroups = groups.map((g) => ({
     ...g,
     apps: g.apps.filter(matches),
-  })).filter((g) => g.apps.length > 0);
+  })).filter((g) => g.apps.length > 0 || editing);
 
   const pinned = allApps.filter((a) => favorites.has(a.id) && matches(a));
 
+  const visibleApps = allApps.filter((a) => !a.hidden);
   const totalVisible = filteredGroups.reduce((n, g) => n + g.apps.length, 0);
-  const onlineCount = allApps.filter((a) => statuses[a.id] === "online").length;
+  const onlineCount = visibleApps.filter((a) => statuses[a.id] === "online").length;
   const timeStr = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
 
   return (
-    <div className={`rincon-root ${theme} ${reduceMotion ? "reduce-motion" : ""}`} data-theme={theme}>
+    <div
+      className={`rincon-root ${theme} ${reduceMotion ? "reduce-motion" : ""}`}
+      data-theme={theme}
+      // Durante o arraste a página toda aceita o "soltar" (senão o Firefox
+      // tenta abrir o link arrastado).
+      onDragOver={(e) => dragId && e.preventDefault()}
+      onDrop={(e) => dragId && e.preventDefault()}
+    >
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
@@ -743,6 +1139,146 @@ export default function RinconMenu() {
           justify-content: space-between;
         }
 
+        /* --- logado: modo edição, diálogos e terminal --- */
+        .theme-btn.active { color: var(--online); border-color: var(--online); }
+        .edit-hint {
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 12px;
+          color: var(--text-muted);
+          margin: -24px 0 30px;
+          line-height: 1.7;
+        }
+        .edit-hint svg { vertical-align: -2px; }
+        .app-card.editable { cursor: grab; }
+        .app-card.is-hidden { opacity: 0.45; border-style: dashed; }
+        .app-card.dragging { opacity: 0.3; }
+        .grip { color: var(--text-faint); }
+        .add-card {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          min-height: 132px;
+          border: 1px dashed var(--panel-border);
+          border-radius: 12px;
+          background: none;
+          color: var(--text-faint);
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 12px;
+          cursor: pointer;
+          transition: border-color 0.2s ease, color 0.2s ease;
+        }
+        .add-card:hover { color: var(--text); border-color: var(--panel-hover-border); }
+        .add-card:focus-visible, .btn:focus-visible, .icon-picker button:focus-visible {
+          outline: 2px solid var(--online);
+          outline-offset: 2px;
+        }
+
+        .overlay {
+          position: fixed;
+          inset: 0;
+          z-index: 50;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 16px;
+          background: rgba(0,0,0,0.55);
+          backdrop-filter: blur(4px);
+        }
+        .dialog {
+          width: 100%;
+          max-width: 440px;
+          max-height: 100%;
+          overflow-y: auto;
+          background: var(--bg);
+          border: 1px solid var(--panel-border);
+          border-radius: 12px;
+          padding: 16px 18px 18px;
+          box-shadow: var(--shadow);
+        }
+        .dialog-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+        .form { display: flex; flex-direction: column; gap: 12px; }
+        .field { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 0; }
+        .field > span { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-faint); }
+        .field .search-input { padding: 9px 12px; }
+        .field-row { display: flex; gap: 12px; }
+        .color-field { flex: 0 0 auto; }
+        .color-field input {
+          width: 52px; height: 37px;
+          padding: 3px;
+          border: 1px solid var(--panel-border);
+          border-radius: 10px;
+          background: var(--panel);
+          cursor: pointer;
+        }
+        .icon-picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(34px, 1fr)); gap: 6px; }
+        .icon-picker button {
+          height: 34px;
+          display: flex; align-items: center; justify-content: center;
+          border: 1px solid var(--panel-border);
+          border-radius: 7px;
+          background: var(--panel);
+          color: var(--text-muted);
+          cursor: pointer;
+        }
+        .icon-picker button.active { color: var(--online); border-color: var(--online); }
+        .form-error { margin: 0; font-size: 12.5px; color: #f87171; }
+        .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+        .btn {
+          display: inline-flex; align-items: center; gap: 6px;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 12.5px;
+          padding: 8px 14px;
+          border-radius: 8px;
+          border: 1px solid var(--panel-border);
+          background: var(--panel);
+          color: var(--text);
+          cursor: pointer;
+        }
+        .btn:disabled { opacity: 0.5; cursor: default; }
+        .btn.primary { background: var(--online); border-color: var(--online); color: #06281c; font-weight: 500; }
+        .btn.danger { color: #f87171; margin-right: auto; }
+
+        .term-panel {
+          width: 100%;
+          max-width: 1100px;
+          height: min(80vh, 720px);
+          display: flex;
+          flex-direction: column;
+          background: #090c10;
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 12px;
+          overflow: hidden;
+          box-shadow: var(--shadow);
+        }
+        .term-head {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 8px 10px 8px 14px;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 13px;
+          color: #edeff4;
+          border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+        .term-head .prompt { color: inherit; }
+        .term-box { flex: 1; min-height: 0; padding: 8px 4px 4px 10px; }
+
+        .notice {
+          position: fixed;
+          left: 50%; bottom: 22px;
+          transform: translateX(-50%);
+          z-index: 60;
+          max-width: calc(100% - 32px);
+          padding: 10px 14px;
+          border-radius: 9px;
+          border: 1px solid rgba(248,113,113,0.4);
+          background: var(--bg);
+          color: #f87171;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 12.5px;
+          box-shadow: var(--shadow);
+        }
+
         @media (max-width: 640px) {
           .rincon-root { padding: 36px 18px 30px; }
           .greeting { font-size: 25px; }
@@ -757,6 +1293,26 @@ export default function RinconMenu() {
           <span className="prompt">menuapp@rincon<span className="caret">:~$</span></span>
           <div className="topbar-right">
             <span className="clock">{timeStr}</span>
+            {me.admin ? (
+              <>
+                <button
+                  className={`theme-btn ${editing ? "active" : ""}`}
+                  onClick={() => setEditing((v) => !v)}
+                  aria-pressed={editing}
+                  aria-label={editing ? "Sair do modo edição" : "Editar links"}
+                  title={editing ? "Sair do modo edição" : "Editar links"}
+                >
+                  <Pencil size={14} />
+                </button>
+                <button className="theme-btn" onClick={logout} aria-label="Sair" title="Sair">
+                  <LogOut size={15} />
+                </button>
+              </>
+            ) : (
+              <button className="theme-btn" onClick={() => setDialog({ type: "login" })} aria-label="Entrar" title="Entrar">
+                <LogIn size={15} />
+              </button>
+            )}
             <button
               className="theme-btn"
               onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -769,7 +1325,7 @@ export default function RinconMenu() {
 
         <h1 className="greeting">{greeting(now.getHours())}</h1>
         <p className="greeting-sub">
-          <span className="count">{onlineCount}</span>/{allApps.length} serviços no ar em {GROUPS.length} grupos
+          <span className="count">{onlineCount}</span>/{visibleApps.length} serviços no ar em {groups.length} grupos
         </p>
 
         <div className="search-wrap">
@@ -786,11 +1342,18 @@ export default function RinconMenu() {
           {!query && <span className="search-hint">/</span>}
         </div>
 
-        {totalVisible === 0 && (
+        {editing && (
+          <p className="edit-hint">
+            modo edição · arraste os cards pra mudar a ordem (ou de seção) · <Eye size={12} /> oculta pra quem não
+            está logado · <Pencil size={12} /> edita · <Plus size={12} /> adiciona — tudo salva na hora
+          </p>
+        )}
+
+        {totalVisible === 0 && !editing && (
           <div className="empty-state">nenhum serviço encontrado para "{query}"</div>
         )}
 
-        {pinned.length > 0 && (
+        {pinned.length > 0 && !editing && (
           <div className="section">
             <div className="section-head">
               <Pin size={13} />
@@ -809,13 +1372,25 @@ export default function RinconMenu() {
         {filteredGroups.map((group) => {
           const sys = systems[group.id];
           const showContainers = openContainers.has(group.id) && sys?.containers;
+          const GroupIcon = ICONS[group.icon] ?? Globe;
           return (
             <div className="section" key={group.id}>
               <div className="section-head">
-                <group.Icon size={13} />
+                <GroupIcon size={13} />
                 <span className="section-title">{group.label.toUpperCase()}</span>
                 <span className="count-badge">{group.apps.length}</span>
                 <div className="section-line" />
+                {me.terminals.includes(group.id) && (
+                  <button
+                    className="containers-btn"
+                    onClick={() => setTerminal(group.id)}
+                    title="Abrir terminal"
+                    aria-label={`Abrir terminal — ${group.label}`}
+                  >
+                    <SquareTerminal size={12} />
+                    terminal
+                  </button>
+                )}
                 {sys && (
                   <MachineStats
                     sys={sys}
@@ -827,8 +1402,25 @@ export default function RinconMenu() {
               {showContainers && <ContainerList containers={sys.containers} />}
               <div className="grid">
                 {group.apps.map((app) => (
-                  <AppCard key={app.id} app={app} isFav={favorites.has(app.id)} onToggleFav={toggleFavorite} status={statuses[app.id] || "checking"} />
+                  <AppCard
+                    key={app.id}
+                    app={app}
+                    isFav={favorites.has(app.id)}
+                    onToggleFav={toggleFavorite}
+                    status={statuses[app.id] || "checking"}
+                    edit={editing ? editProps(app, group.id) : null}
+                  />
                 ))}
+                {editing && (
+                  <button
+                    className="add-card"
+                    onClick={() => setDialog({ type: "app", groupId: group.id })}
+                    onDragEnter={() => dragTo(group.id, null)}
+                  >
+                    <Plus size={18} />
+                    adicionar link
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -839,6 +1431,37 @@ export default function RinconMenu() {
           <span>{now.getFullYear()}</span>
         </div>
       </div>
+
+      {dialog?.type === "login" && (
+        <LoginDialog
+          totp={me.totp}
+          onClose={() => setDialog(null)}
+          onLoggedIn={() => {
+            setDialog(null);
+            loadSession();
+          }}
+        />
+      )}
+      {dialog?.type === "app" && (
+        <AppDialog
+          groups={groups}
+          groupId={dialog.groupId}
+          app={dialog.app}
+          onSave={saveApp}
+          onDelete={() => deleteApp(dialog.app)}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {terminal && (
+        <Suspense fallback={null}>
+          <TerminalPanel
+            machine={terminal}
+            label={groups.find((g) => g.id === terminal)?.label ?? terminal}
+            onClose={() => setTerminal(null)}
+          />
+        </Suspense>
+      )}
+      {notice && <div className="notice" role="status">{notice}</div>}
     </div>
   );
 }

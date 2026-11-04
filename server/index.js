@@ -11,7 +11,9 @@
 //   - host não permitido ou payload inválido -> "unknown" (não checado)
 //
 // Também entrega as métricas das máquinas (RAM, disco e containers) em
-// GET /api/system — ver a seção "Métricas" mais abaixo.
+// GET /api/system, o login do dono (/api/login), o layout dos links salvo
+// pelo modo edição (/api/links) e o terminal das máquinas (WebSocket em
+// /api/terminal) — ver as seções mais abaixo.
 
 // Marcadores das páginas de erro que aparecem quando o serviço de origem caiu
 // mas o proxy/túnel continua no ar (container parado, nginx sem upstream...).
@@ -23,8 +25,12 @@ const ORIGIN_DOWN_STATUS = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525,
 
 import http from "node:http";
 import os from "node:os";
-import { statfs } from "node:fs/promises";
+import path from "node:path";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { statfs, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
+import { WebSocketServer, WebSocket } from "ws";
+import { decodeBase32, verifyTotp } from "./totp.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 const ALLOWED_HOST_SUFFIX = process.env.ALLOWED_HOST_SUFFIX || ".rincon.dev.br";
@@ -38,7 +44,7 @@ const ALLOWED_EXACT_HOSTS = new Set(
 );
 const REQUEST_TIMEOUT_MS = Number(process.env.CHECK_TIMEOUT_MS) || 8000;
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 30000;
-const MAX_TARGETS = 50;
+const MAX_TARGETS = 200;
 
 /** @type {Map<string, { status: string, at: number }>} */
 const cache = new Map();
@@ -120,27 +126,48 @@ const SYSTEM_CACHE_TTL_MS = 10000;
 // "docker system df" é pesado (varre volumes), então o tamanho em disco de
 // cada container é recalculado no máximo a cada 10 min, em segundo plano.
 const DF_CACHE_TTL_MS = 10 * 60 * 1000;
+// Containers descartáveis do terminal (ver seção "Terminal") — não entram na lista.
+const TERMINAL_LABEL = "rincon-menu.terminal";
 
-function dockerGet(path, timeoutMs = 15000) {
+function dockerRequest(method, path, body, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ socketPath: DOCKER_SOCKET, path, timeout: timeoutMs }, (res) => {
-      let data = "";
-      res.setEncoding("utf8");
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        if (res.statusCode !== 200) return reject(new Error(`docker ${path} respondeu ${res.statusCode}`));
-        try {
-          resolve(JSON.parse(data));
-        } catch (err) {
-          reject(err);
-        }
-      });
-    });
+    const payload = body === undefined ? null : JSON.stringify(body);
+    const req = http.request(
+      {
+        socketPath: DOCKER_SOCKET,
+        method,
+        path,
+        timeout: timeoutMs,
+        headers: payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {},
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          if (res.statusCode < 200 || res.statusCode > 299) {
+            let msg = data.trim();
+            try {
+              msg = JSON.parse(data).message || msg;
+            } catch {}
+            return reject(new Error(`docker ${path} respondeu ${res.statusCode}${msg ? `: ${msg}` : ""}`));
+          }
+          if (!data) return resolve(null);
+          try {
+            resolve(JSON.parse(data));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    );
     req.on("timeout", () => req.destroy(new Error(`docker ${path} demorou demais`)));
     req.on("error", reject);
-    req.end();
+    req.end(payload);
   });
 }
+
+const dockerGet = (path, timeoutMs) => dockerRequest("GET", path, undefined, timeoutMs);
 
 // Mesma conta do "docker stats": uso total menos o cache de arquivos inativos.
 function containerRam(stats) {
@@ -197,20 +224,22 @@ async function collectLocal() {
   try {
     const [list, disks] = await Promise.all([dockerGet("/containers/json"), containerDisks()]);
     out.containers = await Promise.all(
-      list.map(async (c) => {
-        let ram = null;
-        try {
-          ram = containerRam(await dockerGet(`/containers/${c.Id}/stats?stream=false&one-shot=true`));
-        } catch {
-          ram = null;
-        }
-        return {
-          name: (c.Names?.[0] || c.Id.slice(0, 12)).replace(/^\//, ""),
-          image: c.Image,
-          ram,
-          disk: disks.get(c.Id) ?? null,
-        };
-      })
+      list
+        .filter((c) => !c.Labels?.[TERMINAL_LABEL])
+        .map(async (c) => {
+          let ram = null;
+          try {
+            ram = containerRam(await dockerGet(`/containers/${c.Id}/stats?stream=false&one-shot=true`));
+          } catch {
+            ram = null;
+          }
+          return {
+            name: (c.Names?.[0] || c.Id.slice(0, 12)).replace(/^\//, ""),
+            image: c.Image,
+            ram,
+            disk: disks.get(c.Id) ?? null,
+          };
+        })
     );
     out.containers.sort((a, b) => (b.ram ?? 0) - (a.ram ?? 0));
   } catch (err) {
@@ -250,7 +279,311 @@ async function collectSystem() {
   return data;
 }
 
-function sendJson(res, code, payload) {
+// --- Login do dono -----------------------------------------------------------
+// Uma senha só (ADMIN_PASSWORD no .env); sem ela o login fica desligado. Com
+// ADMIN_TOTP_SECRET também pede o código de 2 fatores (ver totp.js).
+// Logado dá pra reorganizar / ocultar / adicionar links e abrir o terminal.
+// A sessão é um cookie assinado com HMAC, sem banco: "<expira-em-ms>.<assinatura>".
+// Trocar a senha ou a chave 2FA derruba todas as sessões abertas.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const ADMIN_TOTP_SECRET = (process.env.ADMIN_TOTP_SECRET || "").trim();
+const TOTP_KEY = ADMIN_TOTP_SECRET ? decodeBase32(ADMIN_TOTP_SECRET) : null;
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_LOGIN_FAILS = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+
+/** @type {Map<string, { count: number, first: number }>} */
+const loginFails = new Map();
+// Último passo de 30s cujo código já entrou: o mesmo código não serve 2 vezes.
+let lastTotpStep = 0;
+
+function loginProblem() {
+  if (!ADMIN_PASSWORD) return "login desligado: defina ADMIN_PASSWORD no .env";
+  if (ADMIN_TOTP_SECRET && !TOTP_KEY) return "login desligado: ADMIN_TOTP_SECRET inválida no .env";
+  return null;
+}
+
+// Compara em tempo constante (não vaza pelo tempo de resposta quantos
+// caracteres da senha/token batem).
+function safeEqual(a, b) {
+  const ha = createHash("sha256").update(String(a)).digest();
+  const hb = createHash("sha256").update(String(b)).digest();
+  return timingSafeEqual(ha, hb);
+}
+
+function sign(value) {
+  return createHmac("sha256", `rincon-menu-session:${ADMIN_PASSWORD}:${ADMIN_TOTP_SECRET}`).update(value).digest("base64url");
+}
+
+function isAdmin(req) {
+  if (loginProblem()) return false;
+  const m = /(?:^|;\s*)rm_session=([^;]+)/.exec(req.headers.cookie || "");
+  if (!m) return false;
+  const [exp, sig] = m[1].split(".");
+  return Number(exp) > Date.now() && !!sig && safeEqual(sig, sign(exp));
+}
+
+function sessionCookie(req, value, maxAgeSec) {
+  // "Secure" só quando veio por HTTPS (Cloudflare) — acessando pelo IP da rede
+  // local em http o navegador descartaria o cookie.
+  const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  return `rm_session=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSec}${secure}`;
+}
+
+// Recusa requisições disparadas por outro site — inclusive outros
+// *.rincon.dev.br, que contam como "mesmo site" pro SameSite do cookie.
+function sameOrigin(req) {
+  try {
+    return new URL(req.headers.origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
+function clientIp(req) {
+  return req.headers["cf-connecting-ip"] || req.headers["x-real-ip"] || req.socket.remoteAddress || "?";
+}
+
+// Depois de MAX_LOGIN_FAILS senhas erradas, o IP fica 15 min sem tentar.
+function loginLocked(ip) {
+  const f = loginFails.get(ip);
+  if (f && Date.now() - f.first > LOGIN_LOCK_MS) loginFails.delete(ip);
+  return (loginFails.get(ip)?.count ?? 0) >= MAX_LOGIN_FAILS;
+}
+
+function loginFailed(ip) {
+  if (loginFails.size > 1000) loginFails.clear();
+  const f = loginFails.get(ip) ?? { count: 0, first: Date.now() };
+  f.count++;
+  loginFails.set(ip, f);
+}
+
+function agentAuthorized(req) {
+  return !!AGENT_TOKEN && safeEqual(req.headers.authorization || "", `Bearer ${AGENT_TOKEN}`);
+}
+
+// --- Layout dos links --------------------------------------------------------
+// Ordem, links ocultos e links adicionados pelo modo edição ficam em
+// DATA_DIR/links.json (volume do Docker). Enquanto nada for salvo, GET devolve
+// null e o front usa a lista padrão do RinconMenu.jsx.
+const DATA_DIR = process.env.DATA_DIR || "./data";
+const LINKS_FILE = path.join(DATA_DIR, "links.json");
+
+const ID_RE = /^[a-z0-9-]{1,60}$/;
+const ICON_RE = /^[A-Za-z0-9]{1,40}$/;
+const COLOR_RE = /^#[0-9a-f]{6}$/i;
+const isStr = (v, max) => typeof v === "string" && v.length <= max;
+
+async function loadLinks() {
+  try {
+    return JSON.parse(await readFile(LINKS_FILE, "utf8"));
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+async function saveLinks(groups) {
+  await mkdir(DATA_DIR, { recursive: true });
+  // Grava num temporário e renomeia: nunca fica um arquivo pela metade.
+  await writeFile(`${LINKS_FILE}.tmp`, JSON.stringify(groups, null, 2));
+  await rename(`${LINKS_FILE}.tmp`, LINKS_FILE);
+}
+
+// Valida o layout vindo do front e guarda só os campos conhecidos. A URL
+// precisa ser http(s) (nada de "javascript:") e a cor um hex, porque as duas
+// vão direto pro HTML.
+function cleanGroups(input) {
+  if (!Array.isArray(input) || input.length > 20) return null;
+  const groupIds = new Set();
+  const appIds = new Set();
+  const groups = [];
+  for (const g of input) {
+    if (!g || !ID_RE.test(g.id) || groupIds.has(g.id) || !isStr(g.label, 80) || !ICON_RE.test(g.icon)) return null;
+    if (!Array.isArray(g.apps) || g.apps.length > 100) return null;
+    groupIds.add(g.id);
+    const apps = [];
+    for (const a of g.apps) {
+      if (!a || !ID_RE.test(a.id) || appIds.has(a.id) || !isStr(a.name, 80) || !isStr(a.desc, 200)) return null;
+      if (!COLOR_RE.test(a.accent) || !ICON_RE.test(a.icon) || !isStr(a.url, 2000)) return null;
+      let url;
+      try {
+        url = new URL(a.url);
+      } catch {
+        return null;
+      }
+      if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+      appIds.add(a.id);
+      apps.push({
+        id: a.id,
+        name: a.name,
+        desc: a.desc,
+        url: url.href,
+        domain: isStr(a.domain, 253) && a.domain ? a.domain : url.hostname,
+        accent: a.accent,
+        icon: a.icon,
+        ...(a.hidden ? { hidden: true } : {}),
+      });
+    }
+    groups.push({ id: g.id, label: g.label, icon: g.icon, apps });
+  }
+  return groups;
+}
+
+// --- Terminal das máquinas ---------------------------------------------------
+// Shell no HOST (não no container), pelo navegador, tipo um ssh. Truque: cria
+// pelo socket do Docker um container descartável, privilegiado e com
+// --pid=host, que roda "nsenter -t 1" — entra nos namespaces do processo 1 do
+// host e executa "su -l" lá. O Docker cuida do TTY (Tty: true), então htop,
+// nano etc. funcionam. Fechou o navegador, o container é morto e se apaga
+// sozinho (AutoRemove).
+//
+// O Servidor não tem o menu: o checador daqui repassa o WebSocket pro agente
+// dele (/api/agent/terminal, protegido pelo AGENT_TOKEN), que faz o mesmo lá.
+// Mensagens, iguais nos dois trechos: quem digita manda texto JSON
+// { type: "input", data } / { type: "resize", cols, rows }; a saída do
+// terminal volta como binário (ou texto, pros avisos de erro).
+const TERMINAL_USER = process.env.TERMINAL_USER || "root";
+let terminalImage = process.env.TERMINAL_IMAGE || "";
+
+// Usa a própria imagem do checador: já está baixada, é da arquitetura certa
+// e o busybox do Alpine tem nsenter. (O hostname de um container é o id dele.)
+async function resolveTerminalImage() {
+  terminalImage ||= (await dockerGet(`/containers/${os.hostname()}/json`)).Image;
+  return terminalImage;
+}
+
+// POST /attach com "Upgrade: tcp": o Docker devolve a conexão crua do TTY.
+function dockerAttach(id) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      socketPath: DOCKER_SOCKET,
+      method: "POST",
+      path: `/containers/${id}/attach?stream=1&stdin=1&stdout=1&stderr=1`,
+      headers: { Connection: "Upgrade", Upgrade: "tcp" },
+    });
+    req.on("upgrade", (res, socket, head) => {
+      if (head.length) socket.unshift(head);
+      resolve(socket);
+    });
+    req.on("response", (res) => reject(new Error(`docker attach respondeu ${res.statusCode}`)));
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+async function openHostShell() {
+  const { Id: id } = await dockerRequest("POST", "/containers/create", {
+    Image: await resolveTerminalImage(),
+    Entrypoint: ["nsenter"],
+    Cmd: ["-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "su", "-l", TERMINAL_USER],
+    Env: ["TERM=xterm-256color"],
+    Tty: true,
+    OpenStdin: true,
+    StdinOnce: true,
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+    Labels: { [TERMINAL_LABEL]: "1" },
+    HostConfig: { Privileged: true, PidMode: "host", NetworkMode: "none", AutoRemove: true },
+  });
+  let stream;
+  try {
+    stream = await dockerAttach(id);
+    await dockerRequest("POST", `/containers/${id}/start`);
+  } catch (err) {
+    stream?.destroy();
+    dockerRequest("DELETE", `/containers/${id}?force=1`).catch(() => {});
+    throw err;
+  }
+  return {
+    stream,
+    handle(msg) {
+      let m;
+      try {
+        m = JSON.parse(msg);
+      } catch {
+        return;
+      }
+      if (m.type === "input" && typeof m.data === "string") stream.write(m.data);
+      if (m.type === "resize" && m.cols > 0 && m.rows > 0) {
+        const q = `h=${Math.min(500, m.rows | 0)}&w=${Math.min(500, m.cols | 0)}`;
+        dockerRequest("POST", `/containers/${id}/resize?${q}`).catch(() => {});
+      }
+    },
+    close() {
+      stream.destroy();
+      dockerRequest("POST", `/containers/${id}/kill`).catch(() => {});
+    },
+  };
+}
+
+function attachLocalShell(ws) {
+  let shell = null;
+  // Mensagens que chegam antes do shell abrir (o primeiro resize, por exemplo).
+  const early = [];
+  let closed = false;
+  ws.on("message", (msg) => (shell ? shell.handle(msg) : early.push(msg)));
+  ws.on("close", () => {
+    closed = true;
+    shell?.close();
+  });
+  openHostShell().then(
+    (s) => {
+      shell = s;
+      if (closed) return shell.close();
+      shell.stream.on("data", (chunk) => ws.send(chunk));
+      shell.stream.on("close", () => ws.close());
+      shell.stream.on("error", () => ws.close());
+      early.splice(0).forEach((m) => shell.handle(m));
+    },
+    (err) => {
+      console.warn("[rincon-menu-checker] terminal não abriu:", err.message);
+      if (closed) return;
+      ws.send(`\r\n[não foi possível abrir o terminal: ${err.message}]\r\n`);
+      ws.close();
+    }
+  );
+}
+
+function proxyAgentShell(ws, base) {
+  const url = new URL("/api/agent/terminal", base);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const upstream = new WebSocket(url, { headers: { Authorization: `Bearer ${AGENT_TOKEN}` } });
+  const early = [];
+  ws.on("message", (msg, isBinary) =>
+    upstream.readyState === WebSocket.OPEN ? upstream.send(msg, { binary: isBinary }) : early.push([msg, isBinary])
+  );
+  ws.on("close", () => upstream.terminate());
+  upstream.on("open", () => early.splice(0).forEach(([msg, isBinary]) => upstream.send(msg, { binary: isBinary })));
+  upstream.on("message", (msg, isBinary) => ws.send(msg, { binary: isBinary }));
+  upstream.on("close", () => ws.close());
+  upstream.on("error", (err) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(`\r\n[não foi possível falar com o agente: ${err.message}]\r\n`);
+    ws.close();
+  });
+}
+
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20 });
+
+function terminalHandler(req) {
+  const url = new URL(req.url, "http://localhost");
+  if (url.pathname === "/api/agent/terminal") return agentAuthorized(req) ? attachLocalShell : 401;
+  if (url.pathname !== "/api/terminal") return 404;
+  if (!isAdmin(req) || !sameOrigin(req)) return 401;
+  const machine = url.searchParams.get("machine");
+  if (MACHINE_ID && machine === MACHINE_ID) return attachLocalShell;
+  const remote = REMOTE_AGENTS.find(([id]) => id === machine);
+  return remote ? (ws) => proxyAgentShell(ws, remote[1]) : 404;
+}
+
+function terminalMachines() {
+  return [MACHINE_ID, ...REMOTE_AGENTS.map(([id]) => id)].filter(Boolean);
+}
+
+// --- HTTP --------------------------------------------------------------------
+
+function sendJson(res, code, payload, headers = {}) {
   const data = JSON.stringify(payload);
   res.writeHead(code, {
     "Content-Type": "application/json; charset=utf-8",
@@ -259,11 +592,32 @@ function sendJson(res, code, payload) {
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Cache-Control": "no-store",
+    ...headers,
   });
   res.end(data);
 }
 
-const server = http.createServer((req, res) => {
+// Lê o corpo como JSON; null se for inválido ou maior que maxBytes.
+function readJson(req, maxBytes = 20000) {
+  return new Promise((resolve) => {
+    let body = "";
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      if (tooLarge) return;
+      body += chunk;
+      tooLarge = body.length > maxBytes;
+    });
+    req.on("end", () => {
+      try {
+        resolve(tooLarge ? null : JSON.parse(body));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+async function handle(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
   if (req.method === "OPTIONS") {
@@ -276,69 +630,108 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/api/health") {
-    sendJson(res, 200, { ok: true });
-    return;
-  }
+  switch (`${req.method} ${url.pathname}`) {
+    case "GET /api/health":
+      return sendJson(res, 200, { ok: true });
 
-  if (req.method === "GET" && url.pathname === "/api/system") {
-    collectSystem().then(
-      (data) => sendJson(res, 200, data),
-      (err) => sendJson(res, 500, { error: err.message })
-    );
-    return;
-  }
+    case "GET /api/system":
+      return sendJson(res, 200, await collectSystem());
 
-  // Métricas só desta máquina — quem chama é o checador da máquina onde o
-  // menu roda. Sem AGENT_TOKEN configurado, fica desligado.
-  if (req.method === "GET" && url.pathname === "/api/agent") {
-    if (!AGENT_TOKEN || req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) {
-      sendJson(res, 401, { error: "token inválido" });
-      return;
+    // Métricas só desta máquina — quem chama é o checador da máquina onde o
+    // menu roda. Sem AGENT_TOKEN configurado, fica desligado.
+    case "GET /api/agent":
+      if (!agentAuthorized(req)) return sendJson(res, 401, { error: "token inválido" });
+      return sendJson(res, 200, await collectLocal());
+
+    case "GET /api/me": {
+      const admin = isAdmin(req);
+      return sendJson(res, 200, {
+        admin,
+        loginEnabled: !loginProblem(),
+        totp: !!TOTP_KEY,
+        terminals: admin ? terminalMachines() : [],
+      });
     }
-    collectLocal().then(
-      (data) => sendJson(res, 200, data),
-      (err) => sendJson(res, 500, { error: err.message })
-    );
-    return;
-  }
 
-  if (req.method !== "POST" || url.pathname !== "/api/status") {
-    sendJson(res, 404, { error: "not found" });
-    return;
-  }
-
-  let body = "";
-  let tooLarge = false;
-  req.on("data", (chunk) => {
-    body += chunk;
-    if (body.length > 20000) {
-      tooLarge = true;
-      req.destroy();
+    case "POST /api/login": {
+      const problem = loginProblem();
+      if (problem) return sendJson(res, 503, { error: problem });
+      const ip = clientIp(req);
+      if (loginLocked(ip)) return sendJson(res, 429, { error: "muitas tentativas, espere 15 minutos" });
+      const body = await readJson(req);
+      const passwordOk = typeof body?.password === "string" && safeEqual(body.password, ADMIN_PASSWORD);
+      const step = TOTP_KEY ? verifyTotp(TOTP_KEY, body?.code) : null;
+      const codeOk = !TOTP_KEY || (step !== null && step > lastTotpStep);
+      // Não diz qual dos dois errou.
+      if (!passwordOk || !codeOk) {
+        loginFailed(ip);
+        await sleep(500);
+        return sendJson(res, 401, { error: TOTP_KEY ? "senha ou código incorreto" : "senha incorreta" });
+      }
+      if (TOTP_KEY) lastTotpStep = step;
+      loginFails.delete(ip);
+      const exp = String(Date.now() + SESSION_TTL_MS);
+      const cookie = sessionCookie(req, `${exp}.${sign(exp)}`, SESSION_TTL_MS / 1000);
+      return sendJson(res, 200, { ok: true }, { "Set-Cookie": cookie });
     }
+
+    case "POST /api/logout":
+      return sendJson(res, 200, { ok: true }, { "Set-Cookie": sessionCookie(req, "", 0) });
+
+    // Visitante não recebe os links ocultos.
+    case "GET /api/links": {
+      const groups = await loadLinks();
+      if (!groups || isAdmin(req)) return sendJson(res, 200, { groups });
+      return sendJson(res, 200, { groups: groups.map((g) => ({ ...g, apps: g.apps.filter((a) => !a.hidden) })) });
+    }
+
+    case "PUT /api/links": {
+      if (!isAdmin(req) || !sameOrigin(req)) return sendJson(res, 401, { error: "faça login de novo" });
+      const groups = cleanGroups((await readJson(req, 500000))?.groups);
+      if (!groups) return sendJson(res, 400, { error: "layout inválido" });
+      await saveLinks(groups);
+      return sendJson(res, 200, { groups });
+    }
+
+    case "POST /api/status": {
+      const targets = (await readJson(req))?.targets;
+      if (!Array.isArray(targets)) {
+        return sendJson(res, 400, { error: "corpo precisa ser { targets: [{ id, url }] }" });
+      }
+      const statuses = {};
+      await Promise.all(
+        targets.slice(0, MAX_TARGETS).map(async (t) => {
+          if (!t || typeof t.id !== "string" || typeof t.url !== "string") return;
+          statuses[t.id] = await probeCached(t.url);
+        })
+      );
+      return sendJson(res, 200, { statuses, checkedAt: new Date().toISOString() });
+    }
+
+    default:
+      return sendJson(res, 404, { error: "not found" });
+  }
+}
+
+const server = http.createServer((req, res) => {
+  handle(req, res).catch((err) => {
+    console.warn("[rincon-menu-checker] erro:", err.message);
+    if (!res.headersSent) sendJson(res, 500, { error: err.message });
   });
-  req.on("end", async () => {
-    if (tooLarge) return;
-    let targets;
-    try {
-      targets = JSON.parse(body).targets;
-    } catch {
-      targets = null;
-    }
-    if (!Array.isArray(targets)) {
-      sendJson(res, 400, { error: "corpo precisa ser { targets: [{ id, url }] }" });
-      return;
-    }
+});
 
-    const statuses = {};
-    await Promise.all(
-      targets.slice(0, MAX_TARGETS).map(async (t) => {
-        if (!t || typeof t.id !== "string" || typeof t.url !== "string") return;
-        statuses[t.id] = await probeCached(t.url);
-      })
-    );
-
-    sendJson(res, 200, { statuses, checkedAt: new Date().toISOString() });
+server.on("upgrade", (req, socket, head) => {
+  const open = terminalHandler(req);
+  if (typeof open !== "function") {
+    socket.end(`HTTP/1.1 ${open === 401 ? "401 Unauthorized" : "404 Not Found"}\r\nConnection: close\r\n\r\n`);
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ws.on("error", () => ws.terminate());
+    // Ping a cada 30s: sem tráfego, Nginx e Cloudflare derrubam a conexão.
+    const ping = setInterval(() => ws.ping(), 30000);
+    ws.on("close", () => clearInterval(ping));
+    open(ws);
   });
 });
 

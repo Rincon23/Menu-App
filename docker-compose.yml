@@ -39,11 +39,25 @@ services:
       - MACHINE_ID=orangepi
       - REMOTE_AGENTS=servidor=${SERVIDOR_AGENT_URL:-}
       - AGENT_TOKEN=${AGENT_TOKEN:-}
+      # Senha do login do menu (no .env). Sem ela o login fica desligado.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Chave do 2FA (no .env; gere com: node server/totp.js). Com ela o
+      # login pede também o código do app autenticador.
+      - ADMIN_TOTP_SECRET=${ADMIN_TOTP_SECRET:-}
+      # Usuário do terminal no host (vazio = root).
+      - TERMINAL_USER=${TERMINAL_USER:-}
+      - DATA_DIR=/data
     volumes:
-      # Só leitura das estatísticas dos containers (RAM e tamanho em disco).
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Estatísticas dos containers (RAM e disco) e o terminal, que cria um
+      # container descartável com acesso ao host. É acesso total ao Docker.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Ordem / links ocultos / links adicionados no modo edição.
+      - rincon-menu-data:/data
     # networks:
     #   - default
+
+volumes:
+  rincon-menu-data:
 
 # networks:
 #   proxy:
